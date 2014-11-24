@@ -520,10 +520,10 @@ public class JiraSite extends AbstractDescribableImpl<JiraSite> {
 
         StringBuilder sb = new StringBuilder();
         for (String type : releaseNotes.keySet()) {
-            sb.append(String.format("# %s\n", type));
+            sb.append(String.format("# %s<br>", type));
             for (String issue : releaseNotes.get(type)) {
                 sb.append(issue);
-                sb.append("\n");
+                sb.append("<br>");
             }
         }
 
