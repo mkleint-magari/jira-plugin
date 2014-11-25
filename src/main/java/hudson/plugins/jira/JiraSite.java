@@ -515,28 +515,29 @@ public class JiraSite extends AbstractDescribableImpl<JiraSite> {
                 issueSet = releaseNotes.get(type);
             }
 
-            issueSet.add(this.getReleaseNoteIssueLine(key, summary, status, 0));
+            issueSet.add(this.getReleaseNoteIssueLine(key, summary, issue.getReporter(), 0));
         }
 
         StringBuilder sb = new StringBuilder();
         for (String type : releaseNotes.keySet()) {
-            sb.append(String.format("# %s<br>", type));
+            sb.append(String.format("<h2>%s</h2><br>", type));
             for (String issue : releaseNotes.get(type)) {
                 sb.append(issue);
                 sb.append("<br>");
             }
+            sb.append("<br>");
         }
 
         return sb.toString();
     }
 
-    protected String getReleaseNoteIssueLine(String key, String summary, String status, int type) {
+    protected String getReleaseNoteIssueLine(String key, String summary, String reporterName, int type) {
         if (0 == type) {
             //render ticket line with html-link to jira-issue
             String ticketUrl = this.alternativeUrl + "browse/" + key;
-            return String.format(" - [<a href=\"%s\">%s</a>] %s (%s)", ticketUrl, key, summary, status);
+            return String.format(" - [<a href=\"%s\">%s</a>] %s (%s)", ticketUrl, key, summary, reporterName);
         } else {
-            return String.format(" - [%s] %s (%s)", key, summary, status);
+            return String.format(" - [%s] %s", key, summary);
         }
     }
 
