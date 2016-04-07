@@ -1,9 +1,17 @@
 package hudson.plugins.jira;
 
-import com.google.common.collect.Sets;
-import hudson.MarkupText;
-import hudson.model.AbstractProject;
-import hudson.model.FreeStyleBuild;
+import static org.hamcrest.CoreMatchers.containsString;
+import static org.junit.Assert.assertThat;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.when;
+
+import java.io.IOException;
+import java.net.URL;
+import java.util.Collections;
+import java.util.regex.Pattern;
+
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
@@ -12,13 +20,12 @@ import org.mockito.Mockito;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
 
-import javax.xml.rpc.ServiceException;
-import java.io.IOException;
-import java.net.URL;
-import java.util.Collections;
-import java.util.regex.Pattern;
+import com.google.common.collect.Sets;
 
-import static org.mockito.Mockito.*;
+import hudson.MarkupText;
+import hudson.model.AbstractProject;
+import hudson.model.FreeStyleBuild;
+import hudson.model.Run;
 
 /**
  * @author Kohsuke Kawaguchi
@@ -28,7 +35,7 @@ public class JiraChangeLogAnnotatorTest {
     private JiraSite site;
 
     @Before
-    public void before() throws IOException, ServiceException {
+    public void before() throws IOException {
         JiraSession session = mock(JiraSession.class);
         when(session.getProjectKeys()).thenReturn(
                 Sets.newHashSet("DUMMY", "JENKINS"));
@@ -64,6 +71,22 @@ public class JiraChangeLogAnnotatorTest {
 
         // make sure '$' didn't confuse the JiraChangeLogAnnotator
         Assert.assertTrue(text.toString(false).contains(TITLE));
+    }
+
+    @Test
+    public void testAnnotateWf() throws Exception {
+        Run b = mock(Run.class);
+
+        when(b.getAction(JiraBuildAction.class)).thenReturn(new JiraBuildAction(b, Collections.singleton(new JiraIssue("DUMMY-1", TITLE))));
+
+        MarkupText text = new MarkupText("marking up DUMMY-1.");
+        JiraChangeLogAnnotator annotator = spy(new JiraChangeLogAnnotator());
+        doReturn(site).when(annotator).getSiteForProject((AbstractProject<?, ?>) Mockito.any());
+
+        annotator.annotate(b, null, text);
+
+        // make sure '$' didn't confuse the JiraChangeLogAnnotator
+        assertThat(text.toString(false), containsString(TITLE));
     }
 
     /**
@@ -122,7 +145,7 @@ public class JiraChangeLogAnnotatorTest {
 
     @Test
     @Bug(4132)
-    public void testCaseInsensitiveAnnotate() throws IOException, ServiceException {
+    public void testCaseInsensitiveAnnotate() throws IOException {
 
         Assert.assertTrue(site.existsIssue("JENKINS-123"));
         Assert.assertTrue(site.existsIssue("jenKiNs-123"));
@@ -143,7 +166,7 @@ public class JiraChangeLogAnnotatorTest {
      */
     @Test
     @Bug(5252)
-    public void testGetIssueDetailsForMissingIssues() throws IOException, ServiceException {
+    public void testGetIssueDetailsForMissingIssues() throws IOException {
         FreeStyleBuild b = mock(FreeStyleBuild.class);
 
         JiraChangeLogAnnotator annotator = spy(new JiraChangeLogAnnotator());
@@ -161,7 +184,7 @@ public class JiraChangeLogAnnotatorTest {
      * Tests that no exception is thrown if user issue pattern is invalid (contains no groups)
      */
     @Test
-    public void testInvalidUserPattern() throws IOException, ServiceException {
+    public void testInvalidUserPattern() throws IOException {
         when(site.getIssuePattern()).thenReturn(Pattern.compile("[a-zA-Z][a-zA-Z0-9_]+-[1-9][0-9]*"));
 
         JiraChangeLogAnnotator annotator = spy(new JiraChangeLogAnnotator());
@@ -179,7 +202,7 @@ public class JiraChangeLogAnnotatorTest {
      * Previous implementation did so.
      */
     @Test
-    public void testMatchOnlyMatchGroup1() throws IOException, ServiceException {
+    public void testMatchOnlyMatchGroup1() throws IOException {
 
         JiraChangeLogAnnotator annotator = spy(new JiraChangeLogAnnotator());
         doReturn(site).when(annotator).getSiteForProject((AbstractProject<?, ?>) Mockito.any());

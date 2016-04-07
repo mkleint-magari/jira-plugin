@@ -1,6 +1,12 @@
-import hudson.plugins.jira.soap.*;
+import com.atlassian.jira.rest.client.api.JiraRestClient;
+import com.atlassian.jira.rest.client.api.domain.*;
+import com.atlassian.jira.rest.client.internal.async.AsynchronousJiraRestClientFactory;
+import hudson.plugins.jira.JiraRestService;
+import hudson.plugins.jira.JiraSite;
 
+import java.net.URI;
 import java.net.URL;
+import java.util.List;
 
 /**
  * Test bed to play with JIRA.
@@ -9,47 +15,74 @@ import java.net.URL;
  */
 public class JiraTester {
     public static void main(String[] args) throws Exception {
-        JiraSoapServiceService jiraSoapServiceGetter = new JiraSoapServiceServiceLocator();
 
-        JiraSoapService service = jiraSoapServiceGetter
-                .getJirasoapserviceV2(new URL(JiraConfig.getUrl()));
-        String token = service.login(JiraConfig.getUsername(),
-                JiraConfig.getPassword());
+        final URI uri = new URL(JiraConfig.getUrl()).toURI();
+        final JiraRestClient jiraRestClient = new AsynchronousJiraRestClientFactory()
+                .createWithBasicHttpAuthentication(uri, JiraConfig.getUsername(), JiraConfig.getPassword());
 
-        // key can be used.
-        // RemoteProject[] projects = service.getProjectsNoSchemes(token);
-        // for (RemoteProject p : projects) {
-        // System.out.println(p.getKey());
-        // }
+        final JiraRestService restService = new JiraRestService(uri, jiraRestClient, JiraConfig.getUsername(), JiraConfig.getPassword(), JiraSite.DEFAULT_TIMEOUT);
 
-        String issueId = "TESTPROJEKT-60";
-        String actionId = "21";
+        final String projectKey = "TESTPROJECT";
+        final String issueId = "TESTPROJECT-425";
+        final Integer actionId = 21;
 
-        RemoteIssue issue = service.getIssue(token, "TESTPROJEKT-61");
-        System.out.println("Issue Status: " + issue.getStatus());
+        final Issue issue = restService.getIssue(issueId);
+        System.out.println("issue:" + issue);
 
-        RemoteNamedObject[] actions = service.getAvailableActions(token,
-                issueId);
-        for (RemoteNamedObject action : actions) {
-            System.out.println("Action: " + action.getId() + " - "
-                    + action.getName());
+
+        final List<Transition> availableActions = restService.getAvailableActions(issueId);
+        for (Transition action : availableActions) {
+            System.out.println("Action:" + action);
         }
 
-        RemoteField[] actionFields = service.getFieldsForAction(token, issueId,
-                actionId);
-        for (RemoteField actionField : actionFields) {
-            System.out.println("ActionField: " + actionField.getId() + " - "
-                    + actionField.getName());
+        for (IssueType issueType : restService.getIssueTypes()) {
+            System.out.println(" issue type: " + issueType);
         }
 
-        RemoteField[] customFields = service.getCustomFields(token);
-        for (RemoteField field : customFields) {
-            System.out.println("Field: " + field.getId() + " - " + field.getName());
+//        restService.addVersion("TESTPROJECT", "0.0.2");
+
+        final List<Component> components = restService.getComponents(projectKey);
+        for (Component component : components) {
+            System.out.println("component: " + component);
         }
 
-        RemoteIssue updatedIssues = service.progressWorkflowAction(token,
-                issueId, actionId, null);
-        System.out.println("Issue Status: " + updatedIssues.getStatus());
+//        BasicComponent backendComponent = null;
+//        final Iterable<BasicComponent> components1 = Lists.newArrayList(backendComponent);
+//        restService.createIssue("TESTPROJECT", "This is a test issue created using JIRA jenkins plugin. Please ignore it.", "TESTUSER", components1, "test issue from JIRA jenkins plugin");
+
+        final List<Issue> searchResults = restService.getIssuesFromJqlSearch("project = \"TESTPROJECT\"", 3);
+        for (Issue searchResult : searchResults) {
+            System.out.println("JQL search result: " + searchResult);
+        }
+
+        final List<String> projectsKeys = restService.getProjectsKeys();
+        for (String projectsKey : projectsKeys) {
+            System.out.println("project key: " + projectsKey);
+        }
+
+        final List<Status> statuses = restService.getStatuses();
+        for (Status status : statuses) {
+            System.out.println("status:" + status);
+        }
+
+        final User user = restService.getUser("TESTUSER");
+        System.out.println("user: " + user);
+
+        final List<Version> versions = restService.getVersions(projectKey);
+        for (Version version : versions) {
+            System.out.println("version: "  + version);
+        }
+
+//        Version releaseVersion = new Version(version.getSelf(), version.getId(), version.getName(),
+//                version.getDescription(), version.isArchived(), true, new DateTime());
+//        System.out.println(" >>>> release version 0.0.2");
+//        restService.releaseVersion("TESTPROJECT", releaseVersion);
+
+//        System.out.println(" >>> update issue TESTPROJECT-425");
+//        restService.updateIssue(issueId, Collections.singletonList(releaseVersion));
+
+//        final Issue updatedIssue = restService.progressWorkflowAction(issueId, actionId);
+//        System.out.println("Updated issue:" + updatedIssue);
 
     }
 }

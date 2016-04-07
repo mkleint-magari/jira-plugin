@@ -1,28 +1,28 @@
 package hudson.plugins.jira.versionparameter;
 
+import com.atlassian.jira.rest.client.api.domain.Version;
 import hudson.Extension;
+import hudson.cli.CLICommand;
 import hudson.model.AbstractProject;
+import hudson.model.Job;
 import hudson.model.ParameterDefinition;
 import hudson.model.ParameterValue;
 import hudson.plugins.jira.JiraSession;
 import hudson.plugins.jira.JiraSite;
-import hudson.plugins.jira.soap.RemoteVersion;
 import net.sf.json.JSONObject;
 import org.kohsuke.stapler.DataBoundConstructor;
 import org.kohsuke.stapler.Stapler;
 import org.kohsuke.stapler.StaplerRequest;
 
-import javax.xml.rpc.ServiceException;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.SortedSet;
+import java.util.TreeSet;
 import java.util.regex.Pattern;
 
-import static hudson.Util.fixNull;
-import static java.util.Arrays.asList;
-
 public class JiraVersionParameterDefinition extends ParameterDefinition {
-    private static final long serialVersionUID = 3927562542249244416L;
+    private static final long serialVersionUID = 4232979892748310160L;
 
     private String projectKey;
     private boolean showReleased = false;
@@ -53,29 +53,36 @@ public class JiraVersionParameterDefinition extends ParameterDefinition {
         JiraVersionParameterValue value = req.bindJSON(JiraVersionParameterValue.class, formData);
         return value;
     }
+    
+    @Override
+    public ParameterValue createValue(CLICommand command, String value) throws IOException, InterruptedException {
+        return new JiraVersionParameterValue(getName(), value);
+    }
 
-    public List<JiraVersionParameterDefinition.Result> getVersions() throws IOException, ServiceException {
-        AbstractProject<?, ?> context = Stapler.getCurrentRequest().findAncestorObject(AbstractProject.class);
-
+    public List<JiraVersionParameterDefinition.Result> getVersions() throws IOException {
+        Job<?, ?> context = Stapler.getCurrentRequest().findAncestorObject(Job.class);
+        
         JiraSite site = JiraSite.get(context);
         if (site == null)
             throw new IllegalStateException("JIRA site needs to be configured in the project " + context.getFullDisplayName());
 
-        JiraSession session = site.createSession();
-        if (session == null) throw new IllegalStateException("Remote SOAP access for JIRA isn't configured in Jenkins");
+        JiraSession session = site.getSession();
+        if (session == null) throw new IllegalStateException("Remote access for JIRA isn't configured in Jenkins");
 
-        RemoteVersion[] versions = session.getVersions(projectKey);
+        List<Version> versions = session.getVersions(projectKey);
+        SortedSet<Version> orderedVersions = new TreeSet<Version>(new VersionComparator());
+        orderedVersions.addAll(versions);
 
         List<Result> projectVersions = new ArrayList<Result>();
 
-        for (RemoteVersion version : fixNull(asList(versions))) {
+        for (Version version : orderedVersions) {
             if (match(version)) projectVersions.add(new Result(version));
         }
 
         return projectVersions;
     }
 
-    private boolean match(RemoteVersion version) {
+    private boolean match(Version version) {
         // Match regex if it exists
         if (pattern != null) {
             if (!pattern.matcher(version.getName()).matches()) return false;
@@ -139,9 +146,9 @@ public class JiraVersionParameterDefinition extends ParameterDefinition {
 
     public static class Result {
         public final String name;
-        public final String id;
+        public final Long id;
 
-        public Result(final RemoteVersion version) {
+        public Result(final Version version) {
             this.name = version.getName();
             this.id = version.getId();
         }
