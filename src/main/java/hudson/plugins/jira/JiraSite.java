@@ -549,7 +549,10 @@ public class JiraSite extends AbstractDescribableImpl<JiraSite> {
                 issueSet = releaseNotes.get(type);
             }
 
-            issueSet.add(this.getReleaseNoteIssueLine(key, summary, issue.getReporter(), 0));
+
+
+            issueSet.add(this.getReleaseNoteIssueLine(key, summary, issue.getReporter().getDisplayName(), 0));
+            //issueSet.add(String.format(" - [%s] %s", key, summary));
         }
 
         StringBuilder sb = new StringBuilder();
