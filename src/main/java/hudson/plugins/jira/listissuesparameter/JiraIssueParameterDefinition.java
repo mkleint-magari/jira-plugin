@@ -15,25 +15,24 @@
  */
 package hudson.plugins.jira.listissuesparameter;
 
+import com.atlassian.jira.rest.client.api.domain.Issue;
 import hudson.Extension;
-import hudson.model.AbstractProject;
+import hudson.cli.CLICommand;
+import hudson.model.Job;
 import hudson.model.ParameterDefinition;
 import hudson.model.ParameterValue;
 import hudson.plugins.jira.JiraSession;
 import hudson.plugins.jira.JiraSite;
-import hudson.plugins.jira.soap.RemoteIssue;
 import net.sf.json.JSONObject;
 import org.kohsuke.stapler.DataBoundConstructor;
 import org.kohsuke.stapler.Stapler;
 import org.kohsuke.stapler.StaplerRequest;
 
-import javax.xml.rpc.ServiceException;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
 import static hudson.Util.fixNull;
-import static java.util.Arrays.asList;
 
 public class JiraIssueParameterDefinition extends ParameterDefinition {
     private static final long serialVersionUID = 3927562542249244416L;
@@ -64,21 +63,26 @@ public class JiraIssueParameterDefinition extends ParameterDefinition {
         return value;
     }
 
-    public List<JiraIssueParameterDefinition.Result> getIssues() throws IOException, ServiceException {
-        AbstractProject<?, ?> context = Stapler.getCurrentRequest().findAncestorObject(AbstractProject.class);
+    @Override
+    public ParameterValue createValue(CLICommand command, String value) throws IOException, InterruptedException {
+        return new JiraIssueParameterValue(getName(), value);
+    }
+
+    public List<JiraIssueParameterDefinition.Result> getIssues() throws IOException {
+        Job<?, ?> context = Stapler.getCurrentRequest().findAncestorObject(Job.class);
 
         JiraSite site = JiraSite.get(context);
         if (site == null)
             throw new IllegalStateException("JIRA site needs to be configured in the project " + context.getFullDisplayName());
 
-        JiraSession session = site.createSession();
-        if (session == null) throw new IllegalStateException("Remote SOAP access for JIRA isn't configured in Jenkins");
+        JiraSession session = site.getSession();
+        if (session == null) throw new IllegalStateException("Remote access for JIRA isn't configured in Jenkins");
 
-        RemoteIssue[] issues = session.getIssuesFromJqlSearch(jiraIssueFilter);
+        List<Issue> issues = session.getIssuesFromJqlSearch(jiraIssueFilter);
 
         List<Result> issueValues = new ArrayList<Result>();
 
-        for (RemoteIssue issue : fixNull(asList(issues))) {
+        for (Issue issue : fixNull(issues)) {
             issueValues.add(new Result(issue));
         }
 
@@ -105,7 +109,7 @@ public class JiraIssueParameterDefinition extends ParameterDefinition {
         public final String key;
         public final String summary;
 
-        public Result(final RemoteIssue issue) {
+        public Result(final Issue issue) {
             this.key = issue.getKey();
             this.summary = issue.getSummary();
         }

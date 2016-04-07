@@ -1,27 +1,60 @@
 package hudson.plugins.jira;
 
-import com.google.common.collect.Lists;
-import com.google.common.collect.Sets;
-import hudson.model.*;
-import hudson.plugins.jira.listissuesparameter.JiraIssueParameterValue;
-import hudson.plugins.jira.soap.RemoteComment;
-import hudson.plugins.jira.soap.RemoteGroup;
-import hudson.plugins.jira.soap.RemoteIssue;
-import hudson.scm.ChangeLogSet;
-import hudson.scm.ChangeLogSet.Entry;
+import static org.hamcrest.CoreMatchers.is;
+import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
+import static org.mockito.Matchers.anyString;
+import static org.mockito.Matchers.eq;
+
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+import java.io.IOException;
+import java.rmi.RemoteException;
+import java.util.ArrayList;
+import java.util.Calendar;
+import java.util.Collection;
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+
+import org.hamcrest.Matchers;
+import org.jenkinsci.plugins.workflow.job.WorkflowJob;
+import org.jenkinsci.plugins.workflow.job.WorkflowRun;
 import org.junit.Assert;
+import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 import org.jvnet.hudson.test.Bug;
+import org.jvnet.hudson.test.JenkinsRule;
+import org.jvnet.hudson.test.WithoutJenkins;
 import org.mockito.Mockito;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
 
-import javax.xml.rpc.ServiceException;
-import java.io.IOException;
-import java.util.*;
-import java.util.regex.Pattern;
+import com.atlassian.jira.rest.client.api.RestClientException;
+import com.atlassian.jira.rest.client.api.domain.Comment;
+import com.atlassian.jira.rest.client.api.domain.Issue;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Sets;
 
-import static org.mockito.Mockito.*;
+import hudson.model.FreeStyleBuild;
+import hudson.model.FreeStyleProject;
+import hudson.model.Job;
+import hudson.model.Result;
+import hudson.model.Run;
+import hudson.model.TopLevelItem;
+import hudson.model.User;
+import hudson.scm.ChangeLogSet;
+import hudson.scm.EditType;
+import hudson.scm.SCM;
+import hudson.scm.ChangeLogSet.AffectedFile;
+import hudson.scm.ChangeLogSet.Entry;
+import jenkins.model.Jenkins;
 
 /**
  * Test case for the JIRA {@link Updater}.
@@ -31,7 +64,12 @@ import static org.mockito.Mockito.*;
 @SuppressWarnings("unchecked")
 public class UpdaterTest {
 
-    private static class MockEntry extends Entry {
+        @Rule
+        public JenkinsRule rule = new JenkinsRule();
+
+        private Updater updater;
+
+        private static class MockEntry extends Entry {
 
         private final String msg;
 
@@ -55,146 +93,81 @@ public class UpdaterTest {
         }
     }
 
-    @Test
-    public void testFindIssues() {
-        FreeStyleBuild build = mock(FreeStyleBuild.class);
-        ChangeLogSet changeLogSet = mock(ChangeLogSet.class);
-        BuildListener listener = mock(BuildListener.class);
-
-        when(changeLogSet.iterator()).thenReturn(Collections.EMPTY_LIST.iterator());
-        when(build.getChangeSet()).thenReturn(changeLogSet);
-
-        Set<String> ids = new HashSet<String>();
-        Updater.findIssues(build, ids, null, listener);
-        Assert.assertTrue(ids.isEmpty());
-
-
-        Set<? extends Entry> entries = Sets.newHashSet(new MockEntry("Fixed JIRA-4711"));
-        when(changeLogSet.iterator()).thenReturn(entries.iterator());
-
-        ids = new HashSet<String>();
-        Updater.findIssues(build, ids, JiraSite.DEFAULT_ISSUE_PATTERN, listener);
-        Assert.assertEquals(1, ids.size());
-        Assert.assertEquals("JIRA-4711", ids.iterator().next());
-
-        // now test multiple ids
-        entries = Sets.newHashSet(
-                new MockEntry("Fixed BL-4711"),
-                new MockEntry("TR-123: foo"),
-                new MockEntry("[ABC-42] hallo"),
-                new MockEntry("#123: this one must not match"),
-                new MockEntry("ABC-: this one must also not match"));
-        when(changeLogSet.iterator()).thenReturn(entries.iterator());
-
-        ids = new TreeSet<String>();
-        Updater.findIssues(build, ids, JiraSite.DEFAULT_ISSUE_PATTERN, listener);
-        Assert.assertEquals(3, ids.size());
-        Set<String> expected = Sets.newTreeSet(Sets.newHashSet(
-                "BL-4711", "TR-123", "ABC-42"));
-        Assert.assertEquals(expected, ids);
-    }
-
-    /**
-     * Tests that the JiraIssueParameters are identified as updateable JIRA
-     * issues.
-     */
-    @Test
-    @Bug(12312)
-    public void testFindIssuesWithJiraParameters() {
-        FreeStyleBuild build = mock(FreeStyleBuild.class);
-        ChangeLogSet changeLogSet = mock(ChangeLogSet.class);
-        BuildListener listener = mock(BuildListener.class);
-
-        JiraIssueParameterValue parameter = mock(JiraIssueParameterValue.class);
-        JiraIssueParameterValue parameterTwo = mock(JiraIssueParameterValue.class);
-        ParametersAction action = mock(ParametersAction.class);
-        List<ParameterValue> parameters = new ArrayList<ParameterValue>();
-
-        when(changeLogSet.iterator()).thenReturn(
-                Collections.EMPTY_LIST.iterator());
-        when(build.getChangeSet()).thenReturn(changeLogSet);
-        when(build.getAction(ParametersAction.class)).thenReturn(action);
-        when(action.getParameters()).thenReturn(parameters);
-        when(parameter.getIssue()).thenReturn("JIRA-123");
-        when(parameterTwo.getIssue()).thenReturn("JIRA-321");
-
-        Set<String> ids = new HashSet<String>();
-
-        // Initial state contains zero parameters
-        Updater.findIssues(build, ids, null, listener);
-        Assert.assertTrue(ids.isEmpty());
-
-        ids = new HashSet<String>();
-        parameters.add(parameter);
-        Updater.findIssues(build, ids, JiraSite.DEFAULT_ISSUE_PATTERN, listener);
-        Assert.assertEquals(1, ids.size());
-        Assert.assertEquals("JIRA-123", ids.iterator().next());
-
-        ids = new TreeSet<String>();
-        parameters.add(parameterTwo);
-        Updater.findIssues(build, ids, JiraSite.DEFAULT_ISSUE_PATTERN, listener);
-        Assert.assertEquals(2, ids.size());
-        Set<String> expected = Sets.newTreeSet(Sets.newHashSet("JIRA-123",
-                "JIRA-321"));
-        Assert.assertEquals(expected, ids);
+    @Before
+    public void prepare() {
+        SCM scm = mock(SCM.class);
+        this.updater = new Updater(scm);
     }
 
     @Test
-    @Bug(729)
-    public void testDigitsInProjectNameAllowed() {
-        FreeStyleBuild build = mock(FreeStyleBuild.class);
-        ChangeLogSet changeLogSet = mock(ChangeLogSet.class);
-        when(build.getChangeSet()).thenReturn(changeLogSet);
+    @WithoutJenkins
+    public void testGetScmCommentsFromPreviousBuilds() throws Exception {
+        final FreeStyleProject project = mock(FreeStyleProject.class);
+        final FreeStyleBuild build1 = mock(FreeStyleBuild.class);
+        final MockEntry entry1 = new MockEntry("FOOBAR-1: The first build");
+        {
+            ChangeLogSet changeLogSet = mock(ChangeLogSet.class);
+            when(build1.getChangeSet()).thenReturn(changeLogSet);
+            List<ChangeLogSet<? extends ChangeLogSet.Entry>> changeSets = new ArrayList<ChangeLogSet<? extends Entry>>();
+            changeSets.add(changeLogSet);
+            when(build1.getChangeSets()).thenReturn(changeSets);
+            when(build1.getResult()).thenReturn(Result.FAILURE);
+            doReturn(project).when(build1).getProject();
 
-        Set<? extends Entry> entries = Sets.newHashSet(new MockEntry("Fixed JI123-4711"));
-        when(changeLogSet.iterator()).thenReturn(entries.iterator());
+            doReturn(new JiraCarryOverAction(Lists.newArrayList(new JiraIssue("FOOBAR-1", null))))
+                    .when(build1).getAction(JiraCarryOverAction.class);
 
-        Set<String> ids = new HashSet<String>();
-        BuildListener listener = mock(BuildListener.class);
-        Updater.findIssues(build, ids, JiraSite.DEFAULT_ISSUE_PATTERN, listener);
-        Assert.assertEquals(1, ids.size());
-        Assert.assertEquals("JI123-4711", ids.iterator().next());
-    }
+            final Set<? extends Entry> entries = Sets.newHashSet(entry1);
+            when(changeLogSet.iterator()).thenAnswer(new Answer<Object>() {
 
-    @Test
-    @Bug(4092)
-    public void testUnderscoreInProjectNameAllowed() {
-        FreeStyleBuild build = mock(FreeStyleBuild.class);
-        ChangeLogSet changeLogSet = mock(ChangeLogSet.class);
-        when(build.getChangeSet()).thenReturn(changeLogSet);
+                public Object answer(final InvocationOnMock invocation) throws Throwable {
+                    return entries.iterator();
+                }
+            });
+        }
 
-        Set<? extends Entry> entries = Sets.newHashSet(new MockEntry("Fixed FOO_BAR-4711"));
-        when(changeLogSet.iterator()).thenReturn(entries.iterator());
+        final FreeStyleBuild build2 = mock(FreeStyleBuild.class);
+        final MockEntry entry2 = new MockEntry("FOOBAR-2: The next build");
+        {
+            ChangeLogSet changeLogSet = mock(ChangeLogSet.class);
+            when(build2.getChangeSet()).thenReturn(changeLogSet);
+            List<ChangeLogSet<? extends ChangeLogSet.Entry>> changeSets = new ArrayList<ChangeLogSet<? extends Entry>>();
+            changeSets.add(changeLogSet);
+            when(build2.getChangeSets()).thenReturn(changeSets);
+            when(build2.getPreviousBuild()).thenReturn(build1);
+            when(build2.getResult()).thenReturn(Result.SUCCESS);
+            doReturn(project).when(build2).getProject();
 
-        Set<String> ids = new HashSet<String>();
-        Updater.findIssues(build, ids, JiraSite.DEFAULT_ISSUE_PATTERN, mock(BuildListener.class));
-        Assert.assertEquals(1, ids.size());
-        Assert.assertEquals("FOO_BAR-4711", ids.iterator().next());
-    }
+            final Set<? extends Entry> entries = Sets.newHashSet(entry2);
+            when(changeLogSet.iterator()).thenAnswer(new Answer<Object>() {
 
-    @Test
-    @Bug(4132)
-    public void testLowercaseProjectNameAllowed() {
-        FreeStyleBuild build = mock(FreeStyleBuild.class);
-        ChangeLogSet changeLogSet = mock(ChangeLogSet.class);
-        when(build.getChangeSet()).thenReturn(changeLogSet);
+                public Object answer(final InvocationOnMock invocation) throws Throwable {
+                    return entries.iterator();
+                }
 
-        Set<? extends Entry> entries = Sets.newHashSet(new MockEntry("Fixed foo_bar-4711"));
-        when(changeLogSet.iterator()).thenReturn(entries.iterator());
+            });
+        }
 
-        Set<String> ids = new HashSet<String>();
-        BuildListener listener = mock(BuildListener.class);
-        Updater.findIssues(build, ids, JiraSite.DEFAULT_ISSUE_PATTERN, listener);
-        Assert.assertEquals(1, ids.size());
-        Assert.assertEquals("FOO_BAR-4711", ids.iterator().next());
+        final List<Comment> comments = Lists.newArrayList();
+        final JiraSession session = mock(JiraSession.class);
+        doAnswer(new Answer<Object>() {
 
-        entries = Sets.newHashSet(new MockEntry("Fixed FoO_bAr-4711"));
-        when(changeLogSet.iterator()).thenReturn(entries.iterator());
+            public Object answer(final InvocationOnMock invocation) throws Throwable {
+                Comment rc = Comment.createWithGroupLevel((String) invocation.getArguments()[1], (String) invocation.getArguments()[2]);
+                comments.add(rc);
+                return null;
+            }
 
-        ids = new HashSet<String>();
-        Updater.findIssues(build, ids, JiraSite.DEFAULT_ISSUE_PATTERN, listener);
-        Assert.assertEquals(1, ids.size());
-        Assert.assertEquals("FOO_BAR-4711", ids.iterator().next());
+        }).when(session).addComment(anyString(), anyString(), anyString(), anyString());
+
+        this.updater = new Updater(build2.getProject().getScm());        
+        
+        final List<JiraIssue> ids = Lists.newArrayList(new JiraIssue("FOOBAR-1", null), new JiraIssue("FOOBAR-2", null));
+        updater.submitComments(build2, System.out, "http://jenkins", ids, session, false, false, "", "");
+
+        Assert.assertEquals(2, comments.size());
+        Assert.assertThat(comments.get(0).getBody(), Matchers.containsString(entry1.getMsg()));
+        Assert.assertThat(comments.get(1).getBody(), Matchers.containsString(entry2.getMsg()));
     }
 
     /**
@@ -203,22 +176,19 @@ public class UpdaterTest {
      */
     @Test
     @Bug(4572)
-    public void testComment() throws IOException, ServiceException, InterruptedException {
+    @WithoutJenkins
+    public void testComment() throws Exception {
         // mock JIRA session:
         JiraSession session = mock(JiraSession.class);
         when(session.existsIssue(Mockito.anyString())).thenReturn(Boolean.TRUE);
-        when(session.getIssue(Mockito.anyString())).thenReturn(new RemoteIssue());
-        when(session.getGroup(Mockito.anyString())).thenReturn(new RemoteGroup("Software Development", null));
+        final Issue mockIssue = Mockito.mock(Issue.class);
+        when(session.getIssue(Mockito.anyString())).thenReturn(mockIssue);
 
-        final List<RemoteComment> comments = new ArrayList<RemoteComment>();
+        final List<String> comments = new ArrayList<String>();
 
         Answer answer = new Answer<Object>() {
             public Object answer(InvocationOnMock invocation) throws Throwable {
-                RemoteComment rc = new RemoteComment();
-                rc.setId((String) invocation.getArguments()[0]);
-                rc.setBody((String) invocation.getArguments()[1]);
-                rc.setGroupLevel((String) invocation.getArguments()[2]);
-                comments.add(rc);
+                comments.add((String) invocation.getArguments()[1]);
                 return null;
             }
         };
@@ -235,122 +205,288 @@ public class UpdaterTest {
         Set<? extends Entry> entries = Sets.newHashSet(new MockEntry("Fixed FOOBAR-4711"));
         when(changeLogSet.iterator()).thenReturn(entries.iterator());
 
+        List<ChangeLogSet<? extends ChangeLogSet.Entry>> changeSets = new ArrayList<ChangeLogSet<? extends Entry>>();
+        changeSets.add(changeLogSet);
+        when(build.getChangeSets()).thenReturn(changeSets);
+
         // test:
         List<JiraIssue> ids = Lists.newArrayList(new JiraIssue("FOOBAR-4711", "Title"));
-        Updater.submitComments(build,
+        Updater updaterCurrent = new Updater(build.getParent().getScm());
+        updaterCurrent.submitComments(build,
                 System.out, "http://jenkins", ids, session, false, false, "", "");
 
         Assert.assertEquals(1, comments.size());
-        RemoteComment comment = comments.get(0);
+        String comment = comments.get(0);
 
-        Assert.assertTrue(comment.getBody().contains("FOOBAR-4711"));
-        Assert.assertTrue(comment.getGroupLevel().equals(""));
-
+        Assert.assertTrue(comment.contains("FOOBAR-4711"));
 
         // must also work case-insensitively (JENKINS-4132)
         comments.clear();
         entries = Sets.newHashSet(new MockEntry("Fixed Foobar-4711"));
         when(changeLogSet.iterator()).thenReturn(entries.iterator());
         ids = Lists.newArrayList(new JiraIssue("FOOBAR-4711", "Title"));
-        Updater.submitComments(build,
+
+        updaterCurrent.submitComments(build,
                 System.out, "http://jenkins", ids, session, false, false, "", "");
 
         Assert.assertEquals(1, comments.size());
         comment = comments.get(0);
 
-        Assert.assertTrue(comment.getBody().contains("Foobar-4711"));
+        Assert.assertTrue(comment.contains("Foobar-4711"));
 
     }
 
     /**
-     * Tests that the default pattern doesn't match strings like
-     * 'project-1.1'.
-     * These patterns are used e.g. by the maven release plugin.
+    /**
+     * Checks if issues are correctly removed from the carry over list.
+     * @throws RemoteException
      */
     @Test
-    public void testDoNotMatchDotsInIssueId() {
+    @Bug(17156)
+    @WithoutJenkins
+    public void testIssueIsRemovedFromCarryOverListAfterSubmission() throws RestClientException {
+        // mock build:
         FreeStyleBuild build = mock(FreeStyleBuild.class);
-        ChangeLogSet changeLogSet = mock(ChangeLogSet.class);
+        FreeStyleProject project = mock(FreeStyleProject.class);
+        when(build.getProject()).thenReturn(project);
+        ChangeLogSet changeLogSet = ChangeLogSet.createEmpty(build);
         when(build.getChangeSet()).thenReturn(changeLogSet);
+        when(build.getResult()).thenReturn(Result.SUCCESS);
 
-        // commit messages like the one from the Maven release plugin must not match
-        Set<? extends Entry> entries = Sets.newHashSet(new MockEntry("prepare release project-4.7.1"));
-        when(changeLogSet.iterator()).thenReturn(entries.iterator());
+        final JiraIssue firstIssue = new JiraIssue("FOOBAR-1", "Title");
+        final JiraIssue secondIssue = new JiraIssue("ALIBA-1", "Title");
+        final JiraIssue thirdIssue = new JiraIssue("MOONA-1", "Title");
+        final JiraIssue deletedIssue = new JiraIssue("FOOBAR-2", "Title");
+        final JiraIssue forbiddenIssue = new JiraIssue("LASSO-17", "Title");
 
-        Set<String> ids = new HashSet<String>();
-        Updater.findIssues(build, ids, JiraSite.DEFAULT_ISSUE_PATTERN, null);
-        Assert.assertEquals(0, ids.size());
+        // assume that there is a following list of jira issues from scm commit messages out of hudson.plugins.jira.JiraCarryOverAction
+        List<JiraIssue> issues = Lists.newArrayList(firstIssue, secondIssue, forbiddenIssue, thirdIssue);
 
-        // but ids with just a full-stop after it must still match
-        entries = Sets.newHashSet(new MockEntry("Fixed FOO-4. Did it right this time"));
-        when(changeLogSet.iterator()).thenReturn(entries.iterator());
+        // mock JIRA session:
+        JiraSession session = mock(JiraSession.class);
+        when(session.existsIssue(Mockito.anyString())).thenReturn(Boolean.TRUE);
+//        when(session.getIssue(Mockito.anyString())).thenReturn( new Issue());
+//        when(session.getGroup(Mockito.anyString())).thenReturn(new Group("Software Development", null));
 
-        ids = new HashSet<String>();
-        Updater.findIssues(build, ids, JiraSite.DEFAULT_ISSUE_PATTERN, null);
-        Assert.assertEquals(1, ids.size());
-        Assert.assertEquals("FOO-4", ids.iterator().next());
+        final List<Comment> comments = new ArrayList<Comment>();
 
-        // as well as messages with a full-stop as last character after an issue id
-        entries = Sets.newHashSet(new MockEntry("Fixed FOO-4."));
-        when(changeLogSet.iterator()).thenReturn(entries.iterator());
+        Answer answer = new Answer<Object>() {
+            public Object answer(InvocationOnMock invocation) throws Throwable {
+                Comment c = Comment.createWithGroupLevel((String) invocation.getArguments()[0], (String) invocation.getArguments()[1]);
+                comments.add(c);
+                return null;
+            }
+        };
 
-        ids = new HashSet<String>();
-        Updater.findIssues(build, ids, JiraSite.DEFAULT_ISSUE_PATTERN, null);
-        Assert.assertEquals(1, ids.size());
-        Assert.assertEquals("FOO-4", ids.iterator().next());
+        doAnswer(answer).when(session).addComment(eq(firstIssue.id), Mockito.anyString(), Mockito.anyString(), Mockito.anyString());
+        doAnswer(answer).when(session).addComment(eq(secondIssue.id), Mockito.anyString(), Mockito.anyString(), Mockito.anyString());
+        doAnswer(answer).when(session).addComment(eq(thirdIssue.id), Mockito.anyString(), Mockito.anyString(), Mockito.anyString());
+
+        // issue for the caught exception
+        doThrow(new RestClientException(new Throwable(), 404)).when(session).addComment(eq(deletedIssue.id), Mockito.anyString(), Mockito.anyString(), Mockito.anyString());
+        doThrow(new RestClientException(new Throwable(), 403)).when(session).addComment(eq(forbiddenIssue.id), Mockito.anyString(), Mockito.anyString(), Mockito.anyString());
+
+
+        final String groupVisibility = "";
+        final String roleVisibility = "";
+
+        Updater updaterCurrent = new Updater(build.getParent().getScm());
+
+        updaterCurrent.submitComments(
+                build, System.out, "http://jenkins", issues, session, false, false, groupVisibility, roleVisibility
+        );
+
+        // expected issue list
+        final List<JiraIssue> expectedIssuesToCarryOver = new ArrayList<JiraIssue>();
+        expectedIssuesToCarryOver.add(forbiddenIssue);
+        Assert.assertThat(issues, is(expectedIssuesToCarryOver));
     }
+    
+    @Rule
+    public TemporaryFolder folder = new TemporaryFolder();
 
+    /**
+     * Test that workflow job - run instance of type WorkflowJob - can
+     * return changeSets using java reflection api
+     * @throws IOException 
+     *
+     */
     @Test
-    @Bug(6043)
-    public void testUserPatternNotMatch() {
-        FreeStyleBuild build = mock(FreeStyleBuild.class);
-        ChangeLogSet changeLogSet = mock(ChangeLogSet.class);
-        when(build.getChangeSet()).thenReturn(changeLogSet);
-
-        Set<? extends Entry> entries = Sets.newHashSet(new MockEntry("Fixed FOO_BAR-4711"));
-        when(changeLogSet.iterator()).thenReturn(entries.iterator());
-
-        Set<String> ids = new HashSet<String>();
-        Updater.findIssues(build, ids, Pattern.compile("[(w)]"), mock(BuildListener.class));
-
-        Assert.assertEquals(0, ids.size());
+    @WithoutJenkins
+    public void testGetChangesUsingReflectionForWorkflowJob() throws IOException {
+        Jenkins jenkins = mock(Jenkins.class);
+        
+        when(jenkins.getRootDirFor(Mockito.<TopLevelItem>anyObject())).thenReturn(folder.getRoot());
+        WorkflowJob workflowJob = new WorkflowJob(jenkins, "job");
+        WorkflowRun workflowRun = new WorkflowRun(workflowJob);
+        
+        ChangeLogSet changeLogSet = ChangeLogSet.createEmpty(workflowRun);
+        
+        List<ChangeLogSet<? extends Entry>> changesUsingReflection = RunScmChangeExtractor.getChangesUsingReflection(workflowRun);
+        Assert.assertNotNull(changesUsingReflection);
+        Assert.assertTrue(changesUsingReflection.isEmpty());
+    }
+    
+    @WithoutJenkins
+    @Test(expected=IllegalArgumentException.class)
+    public void testGetChangesUsingReflectionForunknownJob() throws IOException {
+        Run run = mock(Run.class);
+        List<ChangeLogSet<? extends Entry>> changesUsingReflection = RunScmChangeExtractor.getChangesUsingReflection(run);
     }
 
+    /**
+     * Test formatting of scm entry change time.
+     *
+     */
     @Test
-    @Bug(6043)
-    public void testUserPatternMatch() {
-        FreeStyleBuild build = mock(FreeStyleBuild.class);
-        ChangeLogSet changeLogSet = mock(ChangeLogSet.class);
-        when(build.getChangeSet()).thenReturn(changeLogSet);
-
-        Set<? extends Entry> entries = Sets.newHashSet(new MockEntry("Fixed toto [FOOBAR-4711]"), new MockEntry("[TEST-9] with [dede]"), new MockEntry("toto [maven-release-plugin] prepare release foo-2.2.3"));
-        when(changeLogSet.iterator()).thenReturn(entries.iterator());
-
-        Set<String> ids = new HashSet<String>();
-        Pattern pat = Pattern.compile("\\[(\\w+-\\d+)\\]");
-        Updater.findIssues(build, ids, pat, mock(BuildListener.class));
-        Assert.assertEquals(2, ids.size());
-        Assert.assertTrue(ids.contains("TEST-9"));
-        Assert.assertTrue(ids.contains("FOOBAR-4711"));
+    @WithoutJenkins
+    public void testAppendChangeTimestampToDescription() {
+        Updater updater = new Updater(null);
+        StringBuilder description = new StringBuilder();
+        Calendar calendar = Calendar.getInstance();
+        calendar.set(2016, 0, 1, 0, 0, 0);
+        JiraSite site = mock(JiraSite.class);
+        when(site.getDateTimePattern()).thenReturn("yyyy-MM-dd HH:mm:ss");
+        updater.appendChangeTimestampToDescription(description, site, calendar.getTimeInMillis());
+        System.out.println(description.toString());
+        Assert.assertThat(description.toString(), equalTo("2016-01-01 00:00:00"));
     }
 
+    /**
+     * Test formatting of scm entry change description.
+     *
+     */
     @Test
-    @Bug(6043)
-    public void testUserPatternMatchTwoIssuesInOneComment() {
-        FreeStyleBuild build = mock(FreeStyleBuild.class);
-        ChangeLogSet changeLogSet = mock(ChangeLogSet.class);
-        when(build.getChangeSet()).thenReturn(changeLogSet);
+    public void testDateTimeInChangeDescription() {
+        rule.getInstance();
+        Updater updater = new Updater(null);
+        Calendar calendar = Calendar.getInstance();
+        calendar.set(2016, 0, 1, 0, 0, 0);
+        JiraSite site = mock(JiraSite.class);
+        when(site.isAppendChangeTimestamp()).thenReturn(true);
+        when(site.getDateTimePattern()).thenReturn("yyyy-MM-dd HH:mm:ss");
 
-        Set<? extends Entry> entries = Sets.newHashSet(new MockEntry("Fixed toto [FOOBAR-4711]  [FOOBAR-21] "), new MockEntry("[TEST-9] with [dede]"), new MockEntry("toto [maven-release-plugin] prepare release foo-2.2.3"));
-        when(changeLogSet.iterator()).thenReturn(entries.iterator());
+        Run r = mock(Run.class);
+        Job j = mock(Job.class);
+        when(r.getParent()).thenReturn(j);
+        JiraProjectProperty jiraProjectProperty = mock(JiraProjectProperty.class);
+        when(j.getProperty(JiraProjectProperty.class)).thenReturn(jiraProjectProperty);
+        when(jiraProjectProperty.getSite()).thenReturn(site);
 
-        Set<String> ids = new HashSet<String>();
-        Pattern pat = Pattern.compile("\\[(\\w+-\\d+)\\]");
-        Updater.findIssues(build, ids, pat, mock(BuildListener.class));
-        Assert.assertEquals(3, ids.size());
-        Assert.assertTrue(ids.contains("TEST-9"));
-        Assert.assertTrue(ids.contains("FOOBAR-4711"));
-        Assert.assertTrue(ids.contains("FOOBAR-21"));
+        ChangeLogSet.Entry entry = mock(ChangeLogSet.Entry.class);
+        when(entry.getTimestamp()).thenReturn(calendar.getTimeInMillis());
+        when(entry.getCommitId()).thenReturn("dsgsvds2re3dsv");
+        User mockAuthor = mock(User.class);
+        when(mockAuthor.getId()).thenReturn("jenkins-user");
+        when(entry.getAuthor()).thenReturn(mockAuthor);
+
+        String description = updater.createScmChangeEntryDescription(r, entry, false, false);
+        System.out.println(description);
+        Assert.assertThat(description, containsString("2016-01-01 00:00:00"));
+        Assert.assertThat(description, containsString("jenkins-user"));
+        Assert.assertThat(description, containsString("dsgsvds2re3dsv"));
     }
 
+    /**
+     * Test formatting of scm entry change description 
+     * when no format is provided (e.g. when null).
+     *
+     */
+    @Test
+    @WithoutJenkins
+    public void testAppendChangeTimestampToDescriptionNullFormat() {
+        //set default locale -> predictable test without explicit format
+        Locale.setDefault(Locale.ENGLISH);
+        
+        Updater updater = new Updater(null);
+        JiraSite site = mock(JiraSite.class);
+        when(site.isAppendChangeTimestamp()).thenReturn(true);
+        when(site.getDateTimePattern()).thenReturn(null);
+
+        Calendar calendar = Calendar.getInstance();
+        calendar.set(2016, 0, 1, 0, 0, 0);
+        
+        StringBuilder builder = new StringBuilder();
+        updater.appendChangeTimestampToDescription(builder, site, calendar.getTimeInMillis());
+        Assert.assertThat(builder.toString(), equalTo("1/1/16 12:00 AM"));        
+    }
+    
+    /**
+     * Test formatting of scm entry change description 
+     * when no format is provided (e.g. when empty string).
+     *
+     */
+    @Test
+    @WithoutJenkins
+    public void testAppendChangeTimestampToDescriptionNoFormat() {
+        //set default locale -> predictable test without explicit format
+        Locale.setDefault(Locale.ENGLISH);
+        
+        Updater updater = new Updater(null);
+        JiraSite site = mock(JiraSite.class);
+        when(site.isAppendChangeTimestamp()).thenReturn(true);
+        when(site.getDateTimePattern()).thenReturn("");
+
+        Calendar calendar = Calendar.getInstance();
+        calendar.set(2016, 0, 1, 0, 0, 0);
+        
+        StringBuilder builder = new StringBuilder();
+        updater.appendChangeTimestampToDescription(builder, site, calendar.getTimeInMillis());
+        Assert.assertThat(builder.toString(), equalTo("1/1/16 12:00 AM"));        
+    }
+
+    /**
+     * Test formatting of scm entry change description coverage primary wiki
+     * style appendRevisionToDescription and appendAffectedFilesToDescription
+     *
+     */
+    @Test
+    public void tesDescriptionWithAffectedFiles() {
+        rule.getInstance();
+        Updater updater = new Updater(null);
+        Calendar calendar = Calendar.getInstance();
+        calendar.set(2016, 0, 1, 0, 0, 0);
+        JiraSite site = mock(JiraSite.class);
+        when(site.isAppendChangeTimestamp()).thenReturn(false);
+
+        Run r = mock(Run.class);
+        Job j = mock(Job.class);
+        when(r.getParent()).thenReturn(j);
+        JiraProjectProperty jiraProjectProperty = mock(JiraProjectProperty.class);
+        when(j.getProperty(JiraProjectProperty.class)).thenReturn(jiraProjectProperty);
+        when(jiraProjectProperty.getSite()).thenReturn(site);
+
+        ChangeLogSet.Entry entry = mock(ChangeLogSet.Entry.class);
+        when(entry.getTimestamp()).thenReturn(calendar.getTimeInMillis());
+        when(entry.getCommitId()).thenReturn("dsgsvds2re3dsv");
+        User mockAuthor = mock(User.class);
+        when(mockAuthor.getId()).thenReturn("jenkins-user");
+        when(entry.getAuthor()).thenReturn(mockAuthor);
+        
+        Collection<MockAffectedFile> affectedFiles = Lists.newArrayList();
+        MockAffectedFile affectedFile1 = mock(MockAffectedFile.class);
+        when(affectedFile1.getEditType()).thenReturn(EditType.ADD);
+        when(affectedFile1.getPath()).thenReturn("hudson/plugins/jira/File1");
+        affectedFiles.add(affectedFile1);
+        MockAffectedFile corruptedFile = mock(MockAffectedFile.class);
+        when(corruptedFile.getEditType()).thenReturn(null);
+        when(corruptedFile.getPath()).thenReturn(null);
+        affectedFiles.add(corruptedFile);
+        MockAffectedFile affectedFile2 = mock(MockAffectedFile.class);
+        when(affectedFile2.getEditType()).thenReturn(EditType.DELETE);
+        when(affectedFile2.getPath()).thenReturn("hudson/plugins/jira/File2");
+        affectedFiles.add(affectedFile2);
+        MockAffectedFile affectedFile3 = mock(MockAffectedFile.class);
+        when(affectedFile3.getEditType()).thenReturn(EditType.EDIT);
+        when(affectedFile3.getPath()).thenReturn("hudson/plugins/jira/File3");
+        affectedFiles.add(affectedFile3);
+        doReturn(affectedFiles).when(entry).getAffectedFiles();
+
+        String description = updater.createScmChangeEntryDescription(r, entry, true, true);
+        System.out.println(description);
+        Assert.assertThat(description,
+                equalTo(" (jenkins-user: rev dsgsvds2re3dsv)\n" + "* (add) hudson/plugins/jira/File1\n" + "* \n"
+                        + "* (delete) hudson/plugins/jira/File2\n" + "* (edit) hudson/plugins/jira/File3\n"));
+    }
+    
 }

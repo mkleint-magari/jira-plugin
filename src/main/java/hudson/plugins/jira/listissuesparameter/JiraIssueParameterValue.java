@@ -18,46 +18,47 @@ package hudson.plugins.jira.listissuesparameter;
 import hudson.EnvVars;
 import hudson.model.AbstractBuild;
 import hudson.model.ParameterValue;
+import hudson.model.Run;
 import hudson.util.VariableResolver;
 import org.kohsuke.stapler.DataBoundConstructor;
+import org.kohsuke.stapler.export.Exported;
 
 public class JiraIssueParameterValue extends ParameterValue {
     private static final long serialVersionUID = -1078274709338167211L;
 
-    private String issue;
+    private String value;
 
     @DataBoundConstructor
-    public JiraIssueParameterValue(final String name, final String issue) {
+    public JiraIssueParameterValue(final String name, final String value) {
         super(name);
-        this.issue = issue;
+        this.value = value;
     }
 
     @Override
-    public void buildEnvVars(final AbstractBuild<?, ?> build, final EnvVars env) {
-        env.put(getName(), getIssue());
+    public void buildEnvironment(final Run<?, ?> run, final EnvVars env) {
+        env.put(getName(), getValue().toString());
     }
 
     @Override
-    public VariableResolver<String> createVariableResolver(
-            final AbstractBuild<?, ?> build) {
+    public VariableResolver<String> createVariableResolver(final AbstractBuild<?, ?> build) {
         return new VariableResolver<String>() {
             public String resolve(final String name) {
-                return JiraIssueParameterValue.this.name.equals(name) ? getIssue()
-                        : null;
+                return JiraIssueParameterValue.this.name.equals(name) ? getValue().toString() : null;
             }
         };
     }
 
-    public void setIssue(final String issue) {
-        this.issue = issue;
+    public void setValue(final String value) {
+        this.value = value;
     }
 
-    public String getIssue() {
-        return issue;
+    @Exported
+    public Object getValue() {
+        return value;
     }
 
     @Override
     public String toString() {
-        return "(JiraIssueParameterValue) " + getName() + "='" + issue + "'";
+        return "(JiraIssueParameterValue) " + getName() + "='" + value + "'";
     }
 }

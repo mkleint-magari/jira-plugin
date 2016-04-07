@@ -2,10 +2,8 @@ package hudson.plugins.jira;
 
 import hudson.Extension;
 import hudson.model.User;
-import hudson.plugins.jira.soap.RemoteUser;
 import hudson.tasks.MailAddressResolver;
 
-import javax.xml.rpc.ServiceException;
 import java.io.IOException;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -14,23 +12,33 @@ import java.util.regex.Pattern;
 /**
  * Resolve user email by searching his userId as username in JIRA.
  *
- * @author Honza Brázdil <jbrazdil@redhat.com>
+ * @author Honza Brázdil jbrazdil@redhat.com
  */
 @Extension
 public class JiraMailAddressResolver extends MailAddressResolver {
     private static final Logger LOGGER = Logger.getLogger(JiraMailAddressResolver.class.getName());
 
+    /**
+     * Boolean to disable the Jira mail address resolver.
+     *
+     * To disable set the System property "-Dhudson.plugins.jira.JiraMailAddressResolver.disabled=true"
+     */
+    public static boolean disabled = Boolean.getBoolean(JiraMailAddressResolver.class.getName() + ".disabled");
+
     @Override
     public String findMailAddressFor(User u) {
+        if (disabled)
+            return null;
+
         String username = u.getId();
 
         for (JiraSite site : JiraProjectProperty.DESCRIPTOR.getSites()) {
             try {
-                JiraSession session = site.createSession();
+                JiraSession session = site.getSession();
                 if (session != null) {
-                    RemoteUser user = session.service.getUser(session.token, username);
+                    com.atlassian.jira.rest.client.api.domain.User user = session.service.getUser(username);
                     if (user != null) {
-                        String email = user.getEmail();
+                        String email = user.getEmailAddress();
                         if (email != null) {
                             email = unmaskEmail(email);
                             return email;
@@ -38,8 +46,6 @@ public class JiraMailAddressResolver extends MailAddressResolver {
                     }
                 }
             } catch (IOException ex) {
-                LOGGER.log(Level.WARNING, "Unable to create session with " + site.getName(), ex);
-            } catch (ServiceException ex) {
                 LOGGER.log(Level.WARNING, "Unable to create session with " + site.getName(), ex);
             }
         }

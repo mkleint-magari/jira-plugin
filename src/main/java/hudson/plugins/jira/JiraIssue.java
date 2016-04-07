@@ -1,6 +1,6 @@
 package hudson.plugins.jira;
 
-import hudson.plugins.jira.soap.RemoteIssue;
+import com.atlassian.jira.rest.client.api.domain.Issue;
 
 /**
  * One JIRA issue.
@@ -27,7 +27,7 @@ public final class JiraIssue implements Comparable<JiraIssue> {
         this.title = title;
     }
 
-    public JiraIssue(RemoteIssue issue) {
+    public JiraIssue(Issue issue) {
         this(issue.getKey(), issue.getSummary());
     }
 

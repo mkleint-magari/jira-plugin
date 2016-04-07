@@ -1,35 +1,46 @@
 package hudson.plugins.jira;
 
+import com.atlassian.jira.rest.client.api.domain.BasicComponent;
+import com.atlassian.jira.rest.client.api.domain.Component;
+import com.atlassian.jira.rest.client.api.domain.Issue;
+import com.atlassian.jira.rest.client.api.domain.Status;
+import com.google.common.base.Splitter;
+import com.google.common.collect.Lists;
 import hudson.EnvVars;
 import hudson.Extension;
 import hudson.Launcher;
 import hudson.Util;
-import hudson.model.*;
-import hudson.plugins.jira.soap.RemoteComponent;
-import hudson.plugins.jira.soap.RemoteIssue;
+import hudson.model.AbstractBuild;
+import hudson.model.AbstractProject;
+import hudson.model.BuildListener;
+import hudson.model.Result;
+import hudson.model.TaskListener;
 import hudson.tasks.BuildStepDescriptor;
 import hudson.tasks.BuildStepMonitor;
 import hudson.tasks.Notifier;
 import hudson.tasks.Publisher;
 import hudson.util.FormValidation;
-import jenkins.model.Jenkins;
 import net.sf.json.JSONObject;
 import org.kohsuke.stapler.DataBoundConstructor;
 import org.kohsuke.stapler.QueryParameter;
 import org.kohsuke.stapler.StaplerRequest;
 
-import javax.xml.rpc.ServiceException;
-import java.io.*;
-import java.util.HashMap;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.FileReader;
+import java.io.IOException;
+import java.io.PrintWriter;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.logging.Logger;
 
 /**
- * <p/>
  * When a build fails it creates jira issues.
  * Repeated failures does not create a new issue but update the existing issue until the issue is closed.
  *
- * @author Rupali Behera
- * @email rupali@vertisinfotech.com
+ * @author Rupali Behera rupali@vertisinfotech.com
  */
 public class JiraCreateIssueNotifier extends Notifier {
 
@@ -39,6 +50,12 @@ public class JiraCreateIssueNotifier extends Notifier {
     private String testDescription;
     private String assignee;
     private String component;
+
+    enum finishedStatuses {
+        Closed,
+        Done,
+        Resolved
+    }
 
     @DataBoundConstructor
     public JiraCreateIssueNotifier(String projectKey, String testDescription, String assignee, String component) {
@@ -97,10 +114,10 @@ public class JiraCreateIssueNotifier extends Notifier {
     @Override
     public boolean perform(AbstractBuild<?, ?> build, Launcher launcher, BuildListener listener) throws IOException, InterruptedException {
 
-        String jobDirPath = Jenkins.getInstance().getBuildDirFor(build.getProject()).getPath();
+        String jobDirPath = build.getProject().getBuildDir().getPath();
         String filename = jobDirPath + File.separator + "issue.txt";
 
-        EnvVars environmentVariable = build.getEnvironment(TaskListener.NULL);
+        EnvVars vars = build.getEnvironment(TaskListener.NULL);
 
         Result currentBuildResult = build.getResult();
 
@@ -113,11 +130,11 @@ public class JiraCreateIssueNotifier extends Notifier {
 
         if (currentBuildResult != Result.ABORTED && previousBuild != null) {
             if (currentBuildResult == Result.FAILURE) {
-                currentBuildResultFailure(build, listener, previousBuildResult, filename, environmentVariable);
+                currentBuildResultFailure(build, listener, previousBuildResult, filename, vars);
             }
 
             if (currentBuildResult == Result.SUCCESS) {
-                currentBuildResultSuccess(build, listener, previousBuildResult, filename, environmentVariable);
+                currentBuildResultSuccess(build, listener, previousBuildResult, filename, vars);
             }
         }
         return true;
@@ -130,31 +147,26 @@ public class JiraCreateIssueNotifier extends Notifier {
      * @param build
      * @param filename
      * @return issue id
-     * @throws ServiceException
      * @throws IOException
      * @throws InterruptedException
      */
-    private RemoteIssue createJiraIssue(AbstractBuild<?, ?> build, String filename) throws ServiceException, IOException, InterruptedException {
+    private Issue createJiraIssue(AbstractBuild<?, ?> build, String filename) throws IOException, InterruptedException {
 
-        EnvVars environmentVariable = build.getEnvironment(TaskListener.NULL);
-
-        String buildURL = environmentVariable.get("BUILD_URL");
-        String buildNumber = environmentVariable.get("BUILD_NUMBER");
-        String jobName = environmentVariable.get("JOB_NAME");
-        String jenkinsURL = Jenkins.getInstance().getRootUrl();
-
-        String checkDescription = (this.testDescription == "") ? "No description is provided" : this.testDescription;
-        String description = String.format("The test %s has failed. \n\n%s\n\n* First failed run : [%s|%s]\n** [console log|%s]",
-                jobName, checkDescription, buildNumber, buildURL, buildURL.concat("console"));
-
-        RemoteComponent[] components = getJiraComponents(build, this.component);
-
-        String summary = "Test " + jobName + " failure - " + jenkinsURL;
-
+        EnvVars vars = build.getEnvironment(TaskListener.NULL);
         JiraSession session = getJiraSession(build);
-        RemoteIssue issue = session.createIssue(projectKey, description, assignee, components, summary);
 
-        //writing the issue-id to the file, which is present in job's directory.
+        String buildName = getBuildName(vars);
+        String summary = String.format("Build %s failed", buildName);
+        String description = String.format(
+                "%s\n\nThe build %s has failed.\nFirst failed run: %s",
+                (this.testDescription.equals("")) ? "No description is provided" : this.testDescription,
+                buildName,
+                getBuildDetailsString(vars)
+        );
+        Iterable<String> components = Splitter.on(",").trimResults().omitEmptyStrings().split(component);
+
+        Issue issue = session.createIssue(projectKey, description, assignee, components, summary);
+
         writeInFile(filename, issue);
         return issue;
     }
@@ -165,13 +177,12 @@ public class JiraCreateIssueNotifier extends Notifier {
      * @param build
      * @param id
      * @return Status of the issue
-     * @throws ServiceException
      * @throws IOException
      */
-    private String getStatus(AbstractBuild<?, ?> build, String id) throws ServiceException, IOException {
+    private Status getStatus(AbstractBuild<?, ?> build, String id) throws IOException {
 
         JiraSession session = getJiraSession(build);
-        RemoteIssue issue = session.getIssueByKey(id);
+        Issue issue = session.getIssueByKey(id);
         return issue.getStatus();
     }
 
@@ -181,10 +192,9 @@ public class JiraCreateIssueNotifier extends Notifier {
      * @param build
      * @param id
      * @param comment
-     * @throws ServiceException
      * @throws IOException
      */
-    private void addComment(AbstractBuild<?, ?> build, String id, String comment) throws ServiceException, IOException {
+    private void addComment(AbstractBuild<?, ?> build, String id, String comment) throws IOException {
 
         JiraSession session = getJiraSession(build);
         session.addCommentWithoutConstrains(id, comment);
@@ -196,46 +206,31 @@ public class JiraCreateIssueNotifier extends Notifier {
      * @param build
      * @param component
      * @return Array of component
-     * @throws ServiceException
      * @throws IOException
      */
-    private RemoteComponent[] getJiraComponents(AbstractBuild<?, ?> build, String component) throws ServiceException, IOException {
+    private List<BasicComponent> getJiraComponents(AbstractBuild<?, ?> build, String component) throws IOException {
 
         if (Util.fixEmpty(component) == null) {
-            return null;
+            return Collections.emptyList();
         }
 
         JiraSession session = getJiraSession(build);
-        RemoteComponent availableComponents[] = session.getComponents(projectKey);
-
-        //To store all the componets of the particular project
-        HashMap<String, String> components = new HashMap<String, String>();
+        List<Component> availableComponents = session.getComponents(projectKey);
 
         //converting the user input as a string array
-        String inputComponents[] = component.split(",");
-        int numberOfComponents = inputComponents.length;
-        RemoteComponent allcomponents[] = new RemoteComponent[numberOfComponents];
-        for (RemoteComponent rc : availableComponents) {
-            String name = rc.getName();
-            String id = rc.getId();
-            components.put(name, id);
-        }
-        int i = 0;
-        while (i < numberOfComponents) {
-            RemoteComponent componentIssue = new RemoteComponent();
-            String userInput = inputComponents[i];
-            String id = "";
-            for (String key : components.keySet()) {
-                if (userInput.equalsIgnoreCase(key)) {
-                    id = components.get(key);
-                }
+        Splitter splitter = Splitter.on(",").trimResults().omitEmptyStrings();
+        List<String> inputComponents = Lists.newArrayList(splitter.split(component));
+        int numberOfComponents = inputComponents.size();
+
+        final List<BasicComponent> jiraComponents = new ArrayList<BasicComponent>(numberOfComponents);
+
+        for (final BasicComponent availableComponent : availableComponents) {
+            if (inputComponents.contains(availableComponent.getName())) {
+                jiraComponents.add(availableComponent);
             }
-            componentIssue.setName(userInput);
-            componentIssue.setId(id);
-            allcomponents[i] = componentIssue;
-            i++;
         }
-        return allcomponents;
+
+        return jiraComponents;
     }
 
     /**
@@ -259,7 +254,6 @@ public class JiraCreateIssueNotifier extends Notifier {
             }
             return issueId;
         } catch (FileNotFoundException e) {
-            System.out.println("There is no such file...!!");
             return null;
         } finally {
             if (br != null) {
@@ -269,24 +263,28 @@ public class JiraCreateIssueNotifier extends Notifier {
 
     }
 
+    JiraSite getSiteForProject(AbstractProject<?, ?> project) {
+        return JiraSite.get(project);
+    }
+
     /**
      * Returns the jira session.
      *
      * @param build
      * @return JiraSession
-     * @throws ServiceException
      * @throws IOException
      */
-    private JiraSession getJiraSession(AbstractBuild<?, ?> build) throws ServiceException, IOException {
+    private JiraSession getJiraSession(AbstractBuild<?, ?> build) throws IOException {
 
-        JiraSite site = JiraSite.get(build.getProject());
+        JiraSite site = getSiteForProject(build.getProject());
+
         if (site == null) {
             throw new IllegalStateException("JIRA site needs to be configured in the project " + build.getFullDisplayName());
         }
 
-        JiraSession session = site.createSession();
+        JiraSession session = site.getSession();
         if (session == null) {
-            throw new IllegalStateException("Remote SOAP access for JIRA isn't configured in Jenkins");
+            throw new IllegalStateException("Remote access for JIRA isn't configured in Jenkins");
         }
 
         return session;
@@ -295,15 +293,10 @@ public class JiraCreateIssueNotifier extends Notifier {
     /**
      * @param filename
      */
-    private void deleteFile(String filename, TaskListener listener) {
+    private void deleteFile(String filename) {
         File file = new File(filename);
-        if (file.exists()) {
-            if (!file.delete()) {
-                if (file.exists()) {
-                    listener.getLogger().println("WARNING: couldn't delete file: " + filename);
-                }
-                // else: race condition? Someone else deleted it for us
-            }
+        if (file.exists() && !file.delete()) {
+            LOG.warning("WARNING: couldn't delete file: " + filename);
         }
     }
 
@@ -314,7 +307,7 @@ public class JiraCreateIssueNotifier extends Notifier {
      * @param issue
      * @throws FileNotFoundException
      */
-    private void writeInFile(String Filename, RemoteIssue issue) throws FileNotFoundException {
+    private void writeInFile(String Filename, Issue issue) throws FileNotFoundException {
         PrintWriter writer = new PrintWriter(Filename);
         writer.println(issue.getKey());
         writer.close();
@@ -326,49 +319,44 @@ public class JiraCreateIssueNotifier extends Notifier {
      * It adds comment until the previously created issue is closed.
      */
     private void currentBuildResultFailure(AbstractBuild<?, ?> build, BuildListener listener, Result previousBuildResult,
-                                           String filename, EnvVars environmentVariable) throws InterruptedException, IOException {
+                                           String filename, EnvVars vars) throws InterruptedException, IOException {
 
-        String buildURL = environmentVariable.get("BUILD_URL");
-        String buildNumber = environmentVariable.get("BUILD_NUMBER");
         if (previousBuildResult == Result.FAILURE) {
-            String comment = String.format("- Job is still failing.\n- Failed run : [%s|%s]\n** [console log|%s]",
-                    buildNumber, buildURL, buildURL.concat("console"));
+            String comment = String.format("Build is still failing.\nFailed run: %s", getBuildDetailsString(vars));
+
             //Get the issue-id which was filed when the previous built failed
             String issueId = getIssue(filename);
             if (issueId != null) {
-                listener.getLogger().println("*************************Test fails again******************************");
                 try {
                     //The status of the issue which was filed when the previous build failed
-                    String Status = getStatus(build, issueId);
+                    Status status = getStatus(build, issueId);
 
-                    //Status=1=Open OR Status=5=Resolved
-                    if (Status.equals("1") || Status.equals("5")) {
-                        listener.getLogger().println("The previous build also failed creating issue with issue ID " + issueId);
-                        addComment(build, issueId, comment);
-                    }
+                    // Issue Closed, need to open new one
+                    if  (   status.getName().equalsIgnoreCase(finishedStatuses.Closed.toString()) ||
+                            status.getName().equalsIgnoreCase(finishedStatuses.Done.toString()) ) {
 
-                    if (Status.equals("6")) {
                         listener.getLogger().println("The previous build also failed but the issue is closed");
-                        deleteFile(filename, listener);
-                        RemoteIssue issue = createJiraIssue(build, filename);
-                        listener.getLogger().println("Creating jira issue with issue ID " + issue.getKey());
+                        deleteFile(filename);
+                        Issue issue = createJiraIssue(build, filename);
+                        LOG.info(String.format("[%s] created.", issue.getKey()));
+
+                    }else {
+                        addComment(build, issueId, comment);
+                        LOG.info(String.format("[%s] The previous build also failed, comment added.", issueId));
                     }
-                } catch (ServiceException e) {
-                    e.printStackTrace();
+                } catch (IOException e) {
+                    LOG.warning(String.format("[%s] - error processing JIRA change: %s", issueId, e.getMessage()));
                 }
             }
         }
 
         if (previousBuildResult == Result.SUCCESS || previousBuildResult == Result.ABORTED) {
             try {
-                RemoteIssue issue = createJiraIssue(build, filename);
-                listener.getLogger().println("**************************Test Fails******************************");
-                listener.getLogger().println("Creating jira issue with issue ID"
-                        + " " + issue.getKey());
-
-            } catch (ServiceException e) {
+                Issue issue = createJiraIssue(build, filename);
+                listener.getLogger().println("Build failed, created JIRA issue " + issue.getKey());
+            } catch (IOException e) {
                 listener.error("Error creating JIRA issue : " + e.getMessage());
-                LOG.warning("Error creating JIRA issue\n" + e);
+                LOG.warning("Error creating JIRA issue\n" + e.getMessage());
             }
         }
     }
@@ -380,40 +368,62 @@ public class JiraCreateIssueNotifier extends Notifier {
      * @param build
      * @param previousBuildResult
      * @param filename
-     * @param environmentVariable
+     * @param vars
      * @throws InterruptedException
      * @throws IOException
      */
     private void currentBuildResultSuccess(AbstractBuild<?, ?> build, BuildListener listener, Result previousBuildResult,
-                                           String filename, EnvVars environmentVariable) throws InterruptedException, IOException {
-        String buildURL = environmentVariable.get("BUILD_URL");
-        String buildNumber = environmentVariable.get("BUILD_NUMBER");
+                                           String filename, EnvVars vars) throws InterruptedException, IOException {
 
         if (previousBuildResult == Result.FAILURE || previousBuildResult == Result.SUCCESS) {
-            String comment = String.format("- Job is not failing but the issue is still open \n - Passed run : [%s|%s]\n **[console log|%s]",
-                    buildNumber, buildURL, buildURL.concat("console"));
+            String comment = String.format("Previously failing build now is OK.\n Passed run: %s", getBuildDetailsString(vars));
             String issueId = getIssue(filename);
 
             //if issue exists it will check the status and comment or delete the file accordingly
             if (issueId != null) {
                 try {
-                    String status = getStatus(build, issueId);
+                    Status status = getStatus(build, issueId);
 
-                    //Status=1=Open OR Status=5=Resolved
-                    if (status.equals("1") || status.equals("5")) {
+                    //if issue is in closed status
+                    if  (   status.getName().equalsIgnoreCase(finishedStatuses.Closed.toString()) ||
+                            status.getName().equalsIgnoreCase(finishedStatuses.Done.toString()) ) {
+                        LOG.info(String.format("%s is closed", issueId));
+                        deleteFile(filename);
+                    } else {
+                        LOG.info(String.format("%s is not Closed, comment was added.", issueId));
                         addComment(build, issueId, comment);
                     }
 
-                    //if issue is in closed status
-                    if (status.equals("6")) {
-                        deleteFile(filename, listener);
-                    }
-                } catch (ServiceException e) {
+                } catch (IOException e) {
                     listener.error("Error updating JIRA issue " + issueId + " : " + e.getMessage());
                     LOG.warning("Error updating JIRA issue " + issueId + "\n" + e);
                 }
             }
+
         }
+    }
+
+    /**
+     * Returns build details string in wiki format, with hyperlinks.
+     *
+     * @param vars
+     * @return
+     */
+    private String getBuildDetailsString(EnvVars vars){
+        final String buildURL = vars.get("BUILD_URL");
+        return String.format("[%s|%s] [console log|%s]", getBuildName(vars), buildURL, buildURL.concat("console"));
+    }
+
+    /**
+     * Returns build name in format BUILD#10
+     *
+     * @param vars
+     * @return String
+     */
+    private String getBuildName(EnvVars vars){
+        final String jobName = vars.get("JOB_NAME");
+        final String buildNumber = vars.get("BUILD_NUMBER");
+        return String.format("%s #%s", jobName, buildNumber);
     }
 
     public static class DescriptorImpl extends BuildStepDescriptor<Publisher> {
@@ -422,8 +432,7 @@ public class JiraCreateIssueNotifier extends Notifier {
             super(JiraCreateIssueNotifier.class);
         }
 
-        public FormValidation doCheckProjectKey(@QueryParameter String value)
-                throws IOException {
+        public FormValidation doCheckProjectKey(@QueryParameter String value) throws IOException {
             if (value.length() == 0) {
                 return FormValidation.error("Please set the project key");
             }
@@ -431,8 +440,7 @@ public class JiraCreateIssueNotifier extends Notifier {
         }
 
         @Override
-        public JiraCreateIssueNotifier newInstance(StaplerRequest req,
-                                                   JSONObject formData) throws FormException {
+        public JiraCreateIssueNotifier newInstance(StaplerRequest req, JSONObject formData) throws FormException {
             return req.bindJSON(JiraCreateIssueNotifier.class, formData);
         }
 
@@ -443,7 +451,7 @@ public class JiraCreateIssueNotifier extends Notifier {
 
         @Override
         public String getDisplayName() {
-            return "Create Jira Issue";
+            return Messages.JiraCreateIssueNotifier_DisplayName();
         }
 
         @Override

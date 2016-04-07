@@ -1,14 +1,20 @@
 package hudson.plugins.jira;
 
+import hudson.EnvVars;
 import hudson.Extension;
+import hudson.FilePath;
 import hudson.Launcher;
 import hudson.model.AbstractBuild;
 import hudson.model.AbstractProject;
 import hudson.model.BuildListener;
+import hudson.model.Job;
 import hudson.model.Result;
+import hudson.model.Run;
+import hudson.model.TaskListener;
 import hudson.tasks.BuildStepMonitor;
-import hudson.tasks.BuildWrapper;
 import hudson.tasks.BuildWrapperDescriptor;
+import jenkins.tasks.SimpleBuildWrapper;
+
 import org.kohsuke.stapler.DataBoundConstructor;
 
 import java.io.IOException;
@@ -16,8 +22,9 @@ import java.util.HashMap;
 import java.util.Map;
 
 import static org.apache.commons.lang.StringUtils.defaultIfEmpty;
+import static org.apache.commons.lang.StringUtils.isEmpty;
 
-public class JiraCreateReleaseNotes extends BuildWrapper {
+public class JiraCreateReleaseNotes extends SimpleBuildWrapper {
 
     @Extension
     public final static class Descriptor extends BuildWrapperDescriptor {
@@ -31,13 +38,15 @@ public class JiraCreateReleaseNotes extends BuildWrapper {
         public boolean isApplicable(final AbstractProject<?, ?> item) {
             return true;
         }
+
     }
 
     public static final String DEFAULT_FILTER = "status in (Resolved, Closed)";
+    public static final String DEFAULT_ENVVAR_NAME = "RELEASE_NOTES";
+
     private String jiraEnvironmentVariable;
     private String jiraProjectKey;
     private String jiraRelease;
-
     private String jiraFilter;
 
     // not in use anymore, as it always resets the given filter with the DEFAULT_FILTER
@@ -54,7 +63,7 @@ public class JiraCreateReleaseNotes extends BuildWrapper {
                                   final String jiraFilter) {
         this.jiraRelease = jiraRelease;
         this.jiraProjectKey = jiraProjectKey;
-        this.jiraEnvironmentVariable = jiraEnvironmentVariable;
+        this.jiraEnvironmentVariable = defaultIfEmpty(jiraEnvironmentVariable, DEFAULT_ENVVAR_NAME);
         this.jiraFilter = defaultIfEmpty(jiraFilter, DEFAULT_FILTER);
     }
 
@@ -94,43 +103,51 @@ public class JiraCreateReleaseNotes extends BuildWrapper {
         this.jiraRelease = jiraRelease;
     }
 
+
+    JiraSite getSiteForProject(Job<?, ?> project) {
+        return JiraSite.get(project);
+    }
+
     @Override
-    public Environment setUp(final AbstractBuild build, final Launcher launcher, final BuildListener listener)
-            throws IOException, InterruptedException {
+    public void setUp(Context context, Run<?, ?> run, FilePath workspace, Launcher launcher, TaskListener listener, EnvVars initialEnvironment) throws IOException, InterruptedException {
+
+        final JiraSite site = getSiteForProject(run.getParent());
+
         String realRelease = null;
+        String realProjectKey = null;
         String releaseNotes = "No Release Notes";
         String realFilter = DEFAULT_FILTER;
+
         try {
-            realRelease = build.getEnvironment(listener).expand(jiraRelease);
+            realRelease = run.getEnvironment(listener).expand(jiraRelease);
+            realProjectKey = run.getEnvironment(listener).expand(jiraProjectKey);
+            realFilter = run.getEnvironment(listener).expand(jiraFilter);
 
-            if ((realRelease == null) || realRelease.isEmpty()) {
-                throw new IllegalArgumentException("Release is Empty");
+            if (isEmpty(realRelease)) {
+                throw new IllegalArgumentException("No version specified");
+            }
+            if (isEmpty(realProjectKey)) {
+                throw new IllegalArgumentException("No project specified");
             }
 
-            if (jiraFilter != null) {
-                realFilter = build.getEnvironment(listener).expand(jiraFilter);
+            if ((realRelease != null) && !realRelease.isEmpty()) {
+                releaseNotes = site.getReleaseNotesForFixVersion(realProjectKey, realRelease, realFilter);
+            } else {
+                listener.getLogger().printf("No release version found, skipping Release Notes generation\n");
             }
 
-            final JiraSite site = JiraSite.get(build.getProject());
-
-            releaseNotes = site.getReleaseNotesForFixVersion(jiraProjectKey, realRelease, realFilter);
-
-        } catch (final Exception e) {
+        } catch (Exception e) {
             e.printStackTrace(listener.fatalError("Unable to generate release notes for JIRA version %s/%s: %s",
-                    realRelease, jiraProjectKey, e));
-            listener.finished(Result.FAILURE);
-            return new Environment() {
-            };
+                    realRelease,
+                    realProjectKey,
+                    e
+            ));
+            if(listener instanceof BuildListener)
+                ((BuildListener)listener).finished(Result.FAILURE);
         }
 
         final Map<String, String> envMap = new HashMap<String, String>();
         envMap.put(jiraEnvironmentVariable, releaseNotes);
-
-        return new Environment() {
-            @Override
-            public void buildEnvVars(final Map<String, String> env) {
-                env.putAll(envMap);
-            }
-        };
+        context.getEnv().putAll(envMap);
     }
 }
